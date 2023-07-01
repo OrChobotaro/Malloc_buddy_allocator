@@ -123,32 +123,47 @@ void* smalloc(size_t size){
 
     // find the order of wanted block
     int order = find_order(size_with_metadata);
-    //cout << "size entered: " << size << ", size with metadata: " << size_with_metadata;
+
+//    cout << "size entered: " << size << ", size with metadata: " << size_with_metadata;
 
     if(order < 0){
-        // size bigger than 128KB
-        //cout << " and size is bigger than 128KB!!!!!" << endl;
-        return nullptr;
+        void* address_mmap = mmap(NULL, size_with_metadata, PROT_EXEC | PROT_WRITE | PROT_READ ,MAP_ANON | MAP_PRIVATE, -1, 0);
+        if(address_mmap < 0){
+            return nullptr;
+        }
+
+//        cout << "after mmap " << address_mmap << endl;
+        struct MallocMetadata mmap_block_metadata = {
+                size_with_metadata, true, nullptr, nullptr, nullptr,
+                nullptr, (void*)address_mmap
+        };
+
+        *(MallocMetadata*)address_mmap = mmap_block_metadata;
+//        cout << "address of metadata: " << address_mmap << endl;
+        return (void*)((size_t)address_mmap + sizeof(MallocMetadata));
     }
 
-    //cout << " and order is: " << order << endl;
+//    cout << " and order is: " << order << endl;
+
 
     int best_fit_order = 0;
     MallocMetadata* best_fit_metadata = get_best_fit(order, &best_fit_order);
     best_fit_metadata = free_array[best_fit_order].next_free;
 
     if(!best_fit_metadata){
-        //cout << "hereee" << endl;
+
+//        cout << "hereee" << endl;
         return nullptr;
     }
-    //cout << "best_fit_order : " << best_fit_order << endl;
+//    cout << "best_fit_order : " << best_fit_order << endl;
 
 
     while(best_fit_order > order){
-        //cout << "in loop" << endl;
+//        cout << "in loop" << endl;
         // create new metadata
 
-        //cout << "--1--" << endl;
+//        cout << "--1--" << endl;
+
         struct MallocMetadata splitted_block_metadata = {
                 best_fit_metadata->size/2, true, nullptr, nullptr,nullptr,
                 nullptr, (void*)((size_t)best_fit_metadata->address + best_fit_metadata->size/2)
@@ -156,7 +171,6 @@ void* smalloc(size_t size){
         // update first half metadata
         best_fit_metadata->size /= 2;
 
-        //cout << "--2--" << endl;
 
         // remove from linked list
 
@@ -165,7 +179,6 @@ void* smalloc(size_t size){
             best_fit_metadata->next_free->prev_free = &free_array[best_fit_order];
         }
 
-        //cout << "--3--" << endl;
 
         // add to new linked list
         MallocMetadata* tmp = free_array[best_fit_order-1].next_free;
@@ -179,24 +192,25 @@ void* smalloc(size_t size){
             break;
         }
 
-        //cout << "--4--" << endl;
         // if first half should be last node
         if(!tmp){
             tmp = prev_tmp;
         } else {
             tmp->next_free->prev_free = (MallocMetadata*)(splitted_block_metadata.address);
         }
-        //cout << "--5--" << endl;
+
 
         splitted_block_metadata.next_free = tmp->next_free;
         tmp->next_free = best_fit_metadata;
         best_fit_metadata->prev_free = tmp;
         best_fit_metadata->next_free = (MallocMetadata*)(splitted_block_metadata.address);
         splitted_block_metadata.prev_free = best_fit_metadata;
-        //cout << "--6--" << endl;
+
 
 
         // add to original list
+
+
         splitted_block_metadata.next = best_fit_metadata->next;
         if(best_fit_metadata->next){
             best_fit_metadata->next->prev = (MallocMetadata*)splitted_block_metadata.address;
@@ -205,12 +219,16 @@ void* smalloc(size_t size){
         splitted_block_metadata.prev = best_fit_metadata;
 
 
+
+
         // save new metadata to memory
         *(MallocMetadata*)(splitted_block_metadata.address) = splitted_block_metadata;
-        //cout << "--7--" << endl;
+
+//        cout << "--7--" << endl;
 
         best_fit_metadata = get_best_fit(order, &best_fit_order);
-        //cout << "best_fit_metadata->order : " << best_fit_order << endl;
+//        cout << "best_fit_metadata->order : " << best_fit_order << endl;
+
     }
 
 
@@ -265,7 +283,8 @@ void sfree(void* p) {
     }
 
     //find the address of Metadata block
-    void* address_metadata = (void*)((size_t)p - sizeof(MallocMetadata));
+    MallocMetadata* address_metadata = (MallocMetadata*)((size_t)p - (size_t)sizeof(MallocMetadata));
+    cout << "address_metadata->size is:" << address_metadata->size << endl;
     struct MallocMetadata* metadata_info = (MallocMetadata*)address_metadata;
 
     //if a block is already free - return
@@ -299,6 +318,7 @@ void sfree(void* p) {
 //        cout << "metadata address: " << metadata_info << ",     buddy address: " << metadata_info_buddy << endl;
 //
 //        cout << "---1----" << endl;
+
 
         void* address_metadata_first_buddy = (size_t)address_metadata < (size_t)address_metadata_buddy ?
                 address_metadata : address_metadata_buddy;
@@ -343,10 +363,11 @@ void sfree(void* p) {
 
         //cout << "---5----" << endl;
 
-       /* (metadata_info_second_buddy->prev_free)->next_free = metadata_info_second_buddy->next_free;
+ (metadata_info_second_buddy->prev_free)->next_free = metadata_info_second_buddy->next_free;
         (metadata_info_second_buddy->next_free)->prev_free = metadata_info_second_buddy->prev_free;
         metadata_info_second_buddy->next_free = nullptr;
-        metadata_info_second_buddy->prev_free = nullptr;*/
+        metadata_info_second_buddy->prev_free = nullptr;
+
 
 
         //calculate the entry int the free array of the new size
@@ -357,11 +378,13 @@ void sfree(void* p) {
             return;
         }
 
+
         //cout << "---6----" << endl;
 
         //find the correct place for the new merged allocation in the new size free list
         MallocMetadata* metadata_free_array = free_array[entry].next_free;
         MallocMetadata* metadata_prev_free_array = &free_array[entry];
+
 
 
         //cout << "new_entry " << entry << endl;
@@ -592,7 +615,7 @@ MallocMetadata* get_best_fit(int order, int* best_fit_order){
 
     for(int i = order; i < MAX_ORDER+1; i++) {
         if(free_array[i].next_free){
-            cout << "size is" << free_array[i].next_free->size << endl;
+//            cout << "size is" << free_array[i].next_free->size << endl;
             *best_fit_order = i;
             return free_array[i].next_free;
         }
@@ -668,7 +691,9 @@ int main(){
 
     sfree(address1);
 
+
 //    smalloc(1000000);
+//    sfree(address);
 
 
 /*    assert(free_array[MAX_ORDER].next_free);
@@ -685,10 +710,12 @@ int main(){
     num_free = _num_free_blocks();
     num_free_bytes = _num_free_bytes();
 
+
     cout << "num allocated blocks: " << num_allocated << endl;
     cout << "num allocated bytes: " << num_bytes << endl;
     cout << "num free blocks: " << num_free << endl;
     cout << "num free bytes: " << num_free_bytes << endl;
+
 
 
 

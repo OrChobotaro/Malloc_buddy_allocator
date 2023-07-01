@@ -241,21 +241,111 @@ void* scalloc(size_t num, size_t size){
 }
 
 
+
+int calc_entry_for_free_array(int size) {
+    int cur_size = 128;
+    for (int i=0; i<MAX_ORDER+1 ; i++) {
+        if (size == cur_size) {
+            return i;
+        }
+        cur_size = 2*cur_size;
+    }
+    return -1;
+}
+
+
 //// ---3---
 void sfree(void* p) {
     if (p == nullptr) {
         return;
     }
 
-    //find the address of Metadata block, and update "is_free == 1"
+    //find the address of Metadata block
     void* address_metadata = (void*)((size_t)p - sizeof(MallocMetadata));
+    struct MallocMetadata* metadata_info = (MallocMetadata*)address_metadata;
 
-    struct MallocMetadata* block = (MallocMetadata*)address_metadata;
-    if (block->is_free) {
+    //if a block is already free - return
+    if (metadata_info->is_free) {
         return;
     }
-    block->is_free = 1;
+
+    void* address_metadata_buddy = (void*)((size_t)address_metadata ^ metadata_info->size);
+    struct MallocMetadata* metadata_info_buddy = (MallocMetadata*)address_metadata_buddy;
+
+    while (metadata_info_buddy->is_free) {
+
+        void* address_metadata_first_buddy = (size_t)address_metadata < (size_t)address_metadata_buddy ?
+                address_metadata : address_metadata_buddy;
+        void* address_metadata_second_buddy = (size_t)address_metadata < (size_t)address_metadata_buddy ?
+                address_metadata_buddy : address_metadata;
+        struct MallocMetadata* metadata_info_first_buddy = (MallocMetadata*)address_metadata_first_buddy;
+        struct MallocMetadata* metadata_info_second_buddy = (MallocMetadata*)address_metadata_second_buddy;
+
+        metadata_info_first_buddy->size = 2 * metadata_info_first_buddy->size;
+        metadata_info_first_buddy->is_free = true;
+
+        //updating the allocations list
+        metadata_info_first_buddy->next = metadata_info_second_buddy->next;
+        if(metadata_info_second_buddy->next) {
+            (metadata_info_second_buddy->next)->prev = metadata_info_first_buddy;
+        }
+        metadata_info_second_buddy->next = nullptr;
+        metadata_info_second_buddy->prev = nullptr;
+
+
+        //updating the free blocks list - old size
+        metadata_info_first_buddy->prev_free = metadata_info_second_buddy->next_free;
+        if(metadata_info_second_buddy->next_free) {
+            (metadata_info_second_buddy->next_free)->prev = metadata_info_first_buddy->prev_free;
+        }
+        metadata_info_second_buddy->next_free = nullptr;
+        metadata_info_second_buddy->prev_free = nullptr;
+
+       /* (metadata_info_second_buddy->prev_free)->next_free = metadata_info_second_buddy->next_free;
+        (metadata_info_second_buddy->next_free)->prev_free = metadata_info_second_buddy->prev_free;
+        metadata_info_second_buddy->next_free = nullptr;
+        metadata_info_second_buddy->prev_free = nullptr;*/
+
+
+        //calculate the entry int the free array of the new size
+        int entry = calc_entry_for_free_array(metadata_info_first_buddy->size);
+        if (entry == -1) {
+            //////////error
+            assert(entry == -1);
+            return;
+        }
+
+        //find the correct place for the new merged allocation in the list of the new size
+        MallocMetadata* metadata_free_array = free_array[entry]->next;
+        MallocMetadata* metadata_prev_free_array = free_array[entry];
+
+        while (metadata_free_array->address && metadata_free_array->address < metadata_info_first_buddy->address) {
+            metadata_prev_free_array = metadata_free_array;
+            metadata_free_array = metadata_free_array->next_free;
+        }
+
+        if (!metadata_free_array) {
+            metadata_info_first_buddy->prev_free = metadata_prev_free_array;
+            metadata_prev_free_array->next = metadata_info_first_buddy;
+            metadata_free_array->next = nullptr;
+        }
+        else {
+            metadata_info_first_buddy->next_free = metadata_free_array;
+            metadata_free_array->prev_free = metadata_info_first_buddy;
+
+            metadata_info_first_buddy->prev_free = metadata_prev_free_array;
+            metadata_prev_free_array->next = metadata_info_first_buddy;
+        }
+
+        address_metadata_buddy = (void*)((size_t)address_metadata_first_buddy ^
+                metadata_info_first_buddy->size);
+        metadata_info_buddy = (MallocMetadata*)address_metadata_buddy;
+
+    }
 }
+
+
+
 
 
 //// ---4---
@@ -454,6 +544,7 @@ MallocMetadata* get_best_fit(int order, int* best_fit_order){
 
 int main(){
 
+
     cout << "size = " << _size_meta_data() << endl;
 */
 /*    smalloc(10);
@@ -484,6 +575,7 @@ int main(){
     cout << "num allocated bytes: " << num_bytes << endl;
     cout << "num free blocks: " << num_free << endl;
     cout << "num free bytes: " << num_free_bytes << endl;
+
 
 
 

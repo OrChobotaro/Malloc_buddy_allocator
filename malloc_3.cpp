@@ -3,13 +3,20 @@
 #include <iostream>
 #include <string.h>
 #include <stdio.h>
-#include <assert.h>
 #include <sys/mman.h>
+#include <cstdlib>
+#include <time.h>
 using namespace std;
 
 #define MAX_ORDER 10
 
+int mmap_number_bytes = 0;
+int mmap_number_blocks = 0;
+
+int rand_cookie;
+
 struct MallocMetadata {
+    int cookie;
     size_t size;
     bool is_free;
     MallocMetadata* next;
@@ -24,7 +31,7 @@ MallocMetadata arr[32];
 bool is_first_malloc = true;
 
 struct MallocMetadata dummy_head = {
-        0, false, nullptr, nullptr,nullptr
+        -1, 0, false, nullptr, nullptr,nullptr
 };
 
 
@@ -35,6 +42,8 @@ int find_order(size_t size_with_metadata);
 MallocMetadata* get_best_fit(int order, int* best_fit_order);
 size_t _num_free_blocks();
 size_t _num_allocated_blocks();
+void validate_cookie(MallocMetadata* metadata);
+
 
 
 
@@ -42,14 +51,13 @@ size_t _num_allocated_blocks();
 void* smalloc(size_t size){
 
 
-    if(size == 0){
-        return nullptr;
-    }
-    if(size > pow(10, 8)){
-        return nullptr;
-    }
-
     if(is_first_malloc){
+
+        time_t t;
+        srand((unsigned)time(&t));
+        rand_cookie = rand();
+
+
         is_first_malloc = false;
         // align allocation
         void* curr_program_break = sbrk(0);
@@ -62,11 +70,8 @@ void* smalloc(size_t size){
 
         // save metadata to memory blocks
         for(int i = 0; i<32; i++){
-            /*struct MallocMetadata node = {
-                    128*1024, true, nullptr, nullptr,nullptr,
-                    nullptr, (void*)((size_t)address_of_initial_allocation + i*128*1024)
-            };
-*/
+
+            arr[i].cookie = rand_cookie;
             arr[i].size = 128*1024;
             arr[i].is_free = true;
             arr[i].next_free = nullptr;
@@ -80,11 +85,12 @@ void* smalloc(size_t size){
         // initialize free_array:
         for(int i = 0; i < MAX_ORDER+1; i++){
             struct MallocMetadata dummy_node = {
-                    0, false, nullptr, nullptr,nullptr,
+                    rand_cookie, 0, false, nullptr, nullptr,nullptr,
                     nullptr, nullptr
             };
 
             free_array[i] = dummy_node;
+            free_array[i].cookie = rand_cookie;
             free_array[i].size = 0;
             free_array[i].is_free = false;
             free_array[i].next_free = nullptr;
@@ -98,6 +104,7 @@ void* smalloc(size_t size){
         // set lists pointers
         for(int i = 0; i<32; i++){
             MallocMetadata* curr_metadata_address =  (MallocMetadata*)((size_t)address_of_aligned_allocation + i*128*1024);
+            validate_cookie(curr_metadata_address);
             if(i == 0){
                 free_array[MAX_ORDER].next_free = curr_metadata_address;
                 curr_metadata_address->prev_free = &free_array[MAX_ORDER];
@@ -119,31 +126,39 @@ void* smalloc(size_t size){
     }
 
 
+
+
+    if(size == 0){
+        return nullptr;
+    }
+    if(size > pow(10, 8)){
+        return nullptr;
+    }
+
+
     size_t size_with_metadata = size + sizeof (MallocMetadata);
 
     // find the order of wanted block
     int order = find_order(size_with_metadata);
 
-//    cout << "size entered: " << size << ", size with metadata: " << size_with_metadata;
-
-    if(order < 0){
+    if(order < 0){ // if size > 128KB
         void* address_mmap = mmap(NULL, size_with_metadata, PROT_EXEC | PROT_WRITE | PROT_READ ,MAP_ANON | MAP_PRIVATE, -1, 0);
         if(address_mmap < 0){
             return nullptr;
         }
+        mmap_number_blocks++;
+        mmap_number_bytes += size_with_metadata;
 
-//        cout << "after mmap " << address_mmap << endl;
         struct MallocMetadata mmap_block_metadata = {
-                size_with_metadata, true, nullptr, nullptr, nullptr,
+                rand_cookie, size_with_metadata, false, nullptr, nullptr, nullptr,
                 nullptr, (void*)address_mmap
         };
 
         *(MallocMetadata*)address_mmap = mmap_block_metadata;
-//        cout << "address of metadata: " << address_mmap << endl;
+
         return (void*)((size_t)address_mmap + sizeof(MallocMetadata));
     }
 
-//    cout << " and order is: " << order << endl;
 
 
     int best_fit_order = 0;
@@ -151,25 +166,20 @@ void* smalloc(size_t size){
     best_fit_metadata = free_array[best_fit_order].next_free;
 
     if(!best_fit_metadata){
-
-//        cout << "hereee" << endl;
         return nullptr;
     }
-//    cout << "best_fit_order : " << best_fit_order << endl;
 
 
     while(best_fit_order > order){
-//        cout << "in loop" << endl;
-        // create new metadata
 
-//        cout << "--1--" << endl;
-
+        validate_cookie(best_fit_metadata);
         struct MallocMetadata splitted_block_metadata = {
-                best_fit_metadata->size/2, true, nullptr, nullptr,nullptr,
+                rand_cookie, best_fit_metadata->size/2, true, nullptr, nullptr,nullptr,
                 nullptr, (void*)((size_t)best_fit_metadata->address + best_fit_metadata->size/2)
         };
         // update first half metadata
         best_fit_metadata->size /= 2;
+
 
 
         // remove from linked list
@@ -184,6 +194,7 @@ void* smalloc(size_t size){
         MallocMetadata* tmp = free_array[best_fit_order-1].next_free;
         MallocMetadata* prev_tmp = &free_array[best_fit_order-1];
         while(tmp){
+            validate_cookie(tmp);
             if(tmp->address < best_fit_metadata->address){
                 prev_tmp = tmp;
                 tmp = tmp->next_free;
@@ -196,6 +207,7 @@ void* smalloc(size_t size){
         if(!tmp){
             tmp = prev_tmp;
         } else {
+            validate_cookie(tmp->next_free);
             tmp->next_free->prev_free = (MallocMetadata*)(splitted_block_metadata.address);
         }
 
@@ -210,9 +222,9 @@ void* smalloc(size_t size){
 
         // add to original list
 
-
         splitted_block_metadata.next = best_fit_metadata->next;
         if(best_fit_metadata->next){
+            validate_cookie(best_fit_metadata->next);
             best_fit_metadata->next->prev = (MallocMetadata*)splitted_block_metadata.address;
         }
         best_fit_metadata->next = (MallocMetadata*)splitted_block_metadata.address;
@@ -224,19 +236,17 @@ void* smalloc(size_t size){
         // save new metadata to memory
         *(MallocMetadata*)(splitted_block_metadata.address) = splitted_block_metadata;
 
-//        cout << "--7--" << endl;
 
         best_fit_metadata = get_best_fit(order, &best_fit_order);
-//        cout << "best_fit_metadata->order : " << best_fit_order << endl;
 
     }
-
 
     best_fit_metadata->is_free = false;
 
     // remove best fit
     free_array[best_fit_order].next_free = best_fit_metadata->next_free;
     if(best_fit_metadata->next_free){
+        validate_cookie(best_fit_metadata->next_free);
         best_fit_metadata->next_free->prev_free = &free_array[best_fit_order];
     }
 
@@ -278,156 +288,153 @@ int calc_entry_for_free_array(int size) {
 //// ---3---
 void sfree(void* p) {
 
+
     if (p == nullptr) {
         return;
     }
 
     //find the address of Metadata block
-    MallocMetadata* address_metadata = (MallocMetadata*)((size_t)p - (size_t)sizeof(MallocMetadata));
-    cout << "address_metadata->size is:" << address_metadata->size << endl;
+    void* address_metadata = (void*)((size_t)p - sizeof(MallocMetadata));
     struct MallocMetadata* metadata_info = (MallocMetadata*)address_metadata;
 
     //if a block is already free - return
+    validate_cookie(metadata_info);
     if (metadata_info->is_free) {
         return;
     }
 
     if (metadata_info->size > 1024*128) {
+
+
         munmap(p, metadata_info->size);
+        mmap_number_bytes -= (metadata_info->size);
+        mmap_number_blocks-= 1;
         return;
     }
 
     void* address_metadata_buddy = (void*)((size_t)address_metadata ^ metadata_info->size);
     struct MallocMetadata* metadata_info_buddy = (MallocMetadata*)address_metadata_buddy;
+    validate_cookie(metadata_info_buddy);
     int order = calc_entry_for_free_array(metadata_info_buddy->size);
 
-//    cout << "" << endl;
-//    cout << "/////// begin free ////////" <<endl;
-//    cout << "block to free: " << p <<"  and size is: " << metadata_info->size <<endl;
 
     if (!metadata_info_buddy->is_free || order == MAX_ORDER) {
-//        cout << "block buddy is not free" <<endl;
         metadata_info->is_free = true;
+        MallocMetadata* current_metadata = free_array[order].next_free;
+        MallocMetadata* prev = &free_array[order];
+        while(current_metadata && current_metadata->address < metadata_info->address){
+            validate_cookie(current_metadata);
+            prev = current_metadata;
+            current_metadata = current_metadata->next_free;
+        }
+        if(current_metadata){
+            current_metadata->prev_free = metadata_info;
+        }
+        metadata_info->next_free = current_metadata;
+        prev->next_free = metadata_info;
+        metadata_info->prev_free = prev;
+
         return;
     }
 
-
+    int counter = 1;
     while (metadata_info_buddy->is_free && order < MAX_ORDER) {
 
-//        cout << "buddy size is: " << metadata_info_buddy->size << ", order: " << order << endl;
-//        cout << "metadata address: " << metadata_info << ",     buddy address: " << metadata_info_buddy << endl;
-//
-//        cout << "---1----" << endl;
 
+        validate_cookie(metadata_info_buddy);
+        validate_cookie(metadata_info);
 
         void* address_metadata_first_buddy = (size_t)address_metadata < (size_t)address_metadata_buddy ?
-                address_metadata : address_metadata_buddy;
+                                             address_metadata : address_metadata_buddy;
         void* address_metadata_second_buddy = (size_t)address_metadata < (size_t)address_metadata_buddy ?
-                address_metadata_buddy : address_metadata;
+                                              address_metadata_buddy : address_metadata;
         struct MallocMetadata* metadata_info_first_buddy = (MallocMetadata*)address_metadata_first_buddy;
         struct MallocMetadata* metadata_info_second_buddy = (MallocMetadata*)address_metadata_second_buddy;
 
-        //cout << "---3----" << endl;
-
+        validate_cookie(metadata_info_first_buddy);
         metadata_info_first_buddy->size = 2 * metadata_info_first_buddy->size;
         metadata_info_first_buddy->is_free = true;
 
-        //cout << "---4----" << endl;
 
         //updating the allocations list
+        validate_cookie(metadata_info_second_buddy);
         metadata_info_first_buddy->next = metadata_info_second_buddy->next;
         if(metadata_info_second_buddy->next) {
+            validate_cookie(metadata_info_second_buddy->next);
             (metadata_info_second_buddy->next)->prev = metadata_info_first_buddy;
         }
-        //cout << "SFREE:: num_blocks_free = " << _num_free_blocks() << endl;
         metadata_info_second_buddy->next = nullptr;
         metadata_info_second_buddy->prev = nullptr;
 
+
         //updating the free blocks list - old size
-        metadata_info_buddy->prev_free = metadata_info_buddy->next_free;
+        validate_cookie(metadata_info_buddy->prev_free);
+        validate_cookie(metadata_info_buddy->next_free);
+        metadata_info_buddy->prev_free->next_free = metadata_info_buddy->next_free;
         if (metadata_info_buddy->next_free) {
-            metadata_info_buddy->next_free = metadata_info_buddy->prev_free;
+            metadata_info_buddy->next_free->prev_free = metadata_info_buddy->prev_free;
         }
         metadata_info_buddy->next_free = nullptr;
         metadata_info_buddy->prev_free = nullptr;
 
 
-        /*metadata_info_first_buddy->prev_free = metadata_info_second_buddy->next_free;
-        if(metadata_info_second_buddy->next_free) {
-            (metadata_info_second_buddy->next_free)->prev = metadata_info_first_buddy->prev_free;
+        if (counter != 1) {
+            metadata_info->prev_free->next_free = metadata_info->next_free;
+            if (metadata_info->next_free) {
+                metadata_info->next_free->prev_free = metadata_info->prev_free;
+            }
+            metadata_info->next_free = nullptr;
+            metadata_info->prev_free = nullptr;
         }
-        metadata_info_second_buddy->next_free = nullptr;
-        metadata_info_second_buddy->prev_free = nullptr;*/
-
-        //cout << "FREE:: after updating old -  num_blocks_free = " << _num_free_blocks() << endl;
-
-        //cout << "---5----" << endl;
-
- (metadata_info_second_buddy->prev_free)->next_free = metadata_info_second_buddy->next_free;
-        (metadata_info_second_buddy->next_free)->prev_free = metadata_info_second_buddy->prev_free;
-        metadata_info_second_buddy->next_free = nullptr;
-        metadata_info_second_buddy->prev_free = nullptr;
-
 
 
         //calculate the entry int the free array of the new size
         int entry = calc_entry_for_free_array(metadata_info_first_buddy->size);
         if (entry == -1) {
-            //////////error
-            //assert(!(entry == -1));
             return;
         }
 
-
-        //cout << "---6----" << endl;
 
         //find the correct place for the new merged allocation in the new size free list
         MallocMetadata* metadata_free_array = free_array[entry].next_free;
         MallocMetadata* metadata_prev_free_array = &free_array[entry];
 
 
-
-        //cout << "new_entry " << entry << endl;
-
         while (metadata_free_array && metadata_free_array->address < metadata_info_first_buddy->address) {
+            validate_cookie(metadata_free_array);
             metadata_prev_free_array = metadata_free_array;
             metadata_free_array = metadata_free_array->next_free;
         }
 
-        //cout << "---7----" << endl;
 
         if (!metadata_free_array) {
             metadata_info_first_buddy->prev_free = metadata_prev_free_array;
             metadata_prev_free_array->next_free = metadata_info_first_buddy;
             metadata_info_first_buddy->next_free = nullptr;
-            //cout << "---8.1----" << endl;
         }
         else {
             metadata_info_first_buddy->next_free = metadata_free_array;
             metadata_free_array->prev_free = metadata_info_first_buddy;
 
             metadata_info_first_buddy->prev_free = metadata_prev_free_array;
-            metadata_prev_free_array->next = metadata_info_first_buddy;
-            //cout << "---8.2----" << endl;
+            metadata_prev_free_array->next_free = metadata_info_first_buddy;
         }
 
-        //cout << "FREE:: after updating ***new*** -  num_blocks_free = " << _num_free_blocks() << endl;
 
         address_metadata_buddy = (void*)((size_t)address_metadata_first_buddy ^
-                metadata_info_first_buddy->size);
+                                         metadata_info_first_buddy->size);
         metadata_info_buddy = (MallocMetadata*)address_metadata_buddy;
 
         address_metadata = address_metadata_first_buddy;
+        metadata_info = (MallocMetadata*)address_metadata;
 
         order = calc_entry_for_free_array(metadata_info_buddy->size);
 
-        //cout << "---9----" << endl;
+        counter++;
 
-//        cout << "--------------SFREE:: num_blocks_free = " << _num_free_blocks() << endl;
-//        cout << "--------------SFREE:: num_allocated = " << _num_allocated_blocks() << endl;
-        cout << "" << endl;
 
     }
+
 }
 
 
@@ -436,8 +443,6 @@ void sfree(void* p) {
 
 //// ---4---
 void* srealloc(void* oldp, size_t size) {
-
-//    cout << "--1--" << endl;
     if (size == 0) {
         return nullptr;
     }
@@ -448,31 +453,114 @@ void* srealloc(void* oldp, size_t size) {
         return smalloc(size);
     }
 
-//    cout << "--2--" << endl;
 
 
     //find the address of old Metadata block
     void* old_address_metadata = (void*)((size_t)oldp - sizeof(MallocMetadata));
     struct MallocMetadata* block = (MallocMetadata*)old_address_metadata;
 
-//    cout << "--3--" << endl;
-    if (block->size >= size) {
+
+    validate_cookie(block);
+
+    if(block->size >= size){
         return oldp;
     }
-//    cout << "--4--" << endl;
 
-    block->is_free = 1;
+    if(size + sizeof (MallocMetadata) > 128*1024){
+        validate_cookie(block);
+        if(block->size == size + sizeof(MallocMetadata)){
+            return oldp;
+        }
+        munmap(oldp, block->size);
+        mmap_number_bytes -= (block->size - sizeof(MallocMetadata));
 
-    //allocate a new block with the correct size
-    void* new_address_block = smalloc(size);
+        void* address_mmap = mmap(NULL, size + sizeof(MallocMetadata),
+                                  PROT_EXEC | PROT_WRITE | PROT_READ ,MAP_ANON | MAP_PRIVATE, -1, 0);
+        if(address_mmap < 0){
+            return nullptr;
+        }
+        mmap_number_bytes += size;
+        return (void*)((size_t)address_mmap + sizeof (MallocMetadata));
+    }
 
-//    cout << "--5--" << endl;
-    //move the original data to the new block
-    memmove(new_address_block, oldp, size);
 
-//    cout << "--6--" << endl;
+    // check buddies
+    int num_merges = 0;
+    MallocMetadata* metadata_buddy = (MallocMetadata*)((size_t)block ^ block->size);
+    MallocMetadata* tmp_block = block;
+    validate_cookie(metadata_buddy);
+    size_t buddies_merged_size = metadata_buddy->size;
+    bool is_mergable = false;
 
-    return new_address_block;
+    while((metadata_buddy->is_free)){
+        num_merges++;
+        buddies_merged_size = buddies_merged_size*2;
+        if(buddies_merged_size >= size + sizeof(MallocMetadata)){
+            is_mergable = true;
+            break;
+        }
+        tmp_block = (size_t)metadata_buddy < (size_t)tmp_block ?
+                    metadata_buddy : tmp_block;
+        metadata_buddy = (MallocMetadata*)((size_t)tmp_block ^ buddies_merged_size);
+    }
+
+    if(is_mergable){
+        MallocMetadata* metadata_info_buddy = (MallocMetadata*)((size_t)block ^ block->size);
+        tmp_block = block;
+        for(int i = 0; i < num_merges; i++){
+
+            validate_cookie(metadata_info_buddy);
+            validate_cookie(tmp_block);
+
+            void* address_metadata_first_buddy = (size_t)metadata_info_buddy < (size_t)tmp_block ?
+                                                 (void*)metadata_info_buddy : (void*)tmp_block;
+            void* address_metadata_second_buddy = (size_t)metadata_info_buddy < (size_t)tmp_block ?
+                                                  (void*)tmp_block : (void*)metadata_info_buddy;
+            struct MallocMetadata* metadata_info_first_buddy = (MallocMetadata*)address_metadata_first_buddy;
+            struct MallocMetadata* metadata_info_second_buddy = (MallocMetadata*)address_metadata_second_buddy;
+
+            validate_cookie(metadata_info_first_buddy);
+            metadata_info_first_buddy->size = 2 * metadata_info_first_buddy->size;
+            metadata_info_first_buddy->is_free = false;
+
+
+            //updating the allocations list
+            validate_cookie(metadata_info_second_buddy);
+            metadata_info_first_buddy->next = metadata_info_second_buddy->next;
+            if(metadata_info_second_buddy->next) {
+                validate_cookie(metadata_info_second_buddy->next);
+                (metadata_info_second_buddy->next)->prev = metadata_info_first_buddy;
+            }
+            metadata_info_second_buddy->next = nullptr;
+            metadata_info_second_buddy->prev = nullptr;
+
+
+            //updating the free blocks list - old size
+
+            metadata_info_buddy->prev_free->next_free = metadata_info_buddy->next_free;
+            if (metadata_info_buddy->next_free) {
+                metadata_info_buddy->next_free->prev_free = metadata_info_buddy->prev_free;
+            }
+            metadata_info_buddy->next_free = nullptr;
+            metadata_info_buddy->prev_free = nullptr;
+
+
+
+            metadata_info_buddy = (MallocMetadata*)((size_t)address_metadata_first_buddy ^
+                                                    metadata_info_first_buddy->size);
+            tmp_block = (MallocMetadata*)address_metadata_first_buddy;
+        }
+        memmove((void*)((size_t)(tmp_block) + sizeof(MallocMetadata)), (void*)((size_t)(block) + sizeof(MallocMetadata)), block->size);
+        return (void*)((size_t)(tmp_block) + sizeof(MallocMetadata));
+    }
+    else {
+
+        void* new_address_block = smalloc(size);
+        memmove(new_address_block, oldp, block->size);
+        sfree(oldp);
+        return new_address_block;
+    }
+
 }
 
 
@@ -483,9 +571,11 @@ size_t _num_free_blocks(){
     struct MallocMetadata *block = &dummy_head;
 
     // start from first block - not from dummy
+
     block = block->next;
 
     while(block){
+        validate_cookie(block);
         if(block->is_free){
             counter++;
         }
@@ -493,70 +583,6 @@ size_t _num_free_blocks(){
     }
 
     return counter;
-}
-
-//// ---6---
-size_t _num_free_bytes(){
-
-    size_t free_bytes = 0;
-
-    struct MallocMetadata *block = &dummy_head;
-    block = block->next;
-
-    // count free bytes without metadata
-    while(block){
-        if(block->is_free){
-            free_bytes += block->size;
-        }
-        block = block->next;
-    }
-
-    return free_bytes;
-
-}
-
-
-//// ---7---
-size_t _num_allocated_blocks(){
-
-//    cout << "--start _num_allocated_blocks--" << endl;
-    size_t counter = 0;
-    struct MallocMetadata *block = &dummy_head;
-
-
-    // start from first block - not from dummy
-    block = block->next;
-
-//    cout << "--before while loop--" << endl;
-    while(block){
-//        cout << "--in while loop--" << endl;
-//        cout << "block size: " << block->size << endl;
-        counter++;
-        block = block->next;
-    }
-
-
-    return counter;
-
-}
-
-//// ---8---
-size_t _num_allocated_bytes(){
-
-    size_t allocated_bytes = 0;
-
-    struct MallocMetadata *block = &dummy_head;
-    block = block->next;
-
-    // count free bytes without metadata
-//    cout << "--before while loop--" << endl;
-    while(block){
-//        cout << '+' << endl;
-        allocated_bytes += block->size;
-        block = block->next;
-    }
-
-    return allocated_bytes;
 }
 
 //// ---10---
@@ -573,6 +599,74 @@ size_t _num_meta_data_bytes(){
 
 }
 
+//// ---6---
+size_t _num_free_bytes(){
+
+    size_t free_bytes = 0;
+
+    struct MallocMetadata *block = &dummy_head;
+    block = block->next;
+
+    // count free bytes without metadata
+    while(block){
+        validate_cookie(block);
+        if(block->is_free){
+            free_bytes += block->size;
+        }
+        block = block->next;
+    }
+
+    size_t free_blocks = _num_free_blocks();
+    size_t size_metadata = _size_meta_data();
+    return free_bytes - (free_blocks*size_metadata);
+
+}
+
+
+//// ---7---
+size_t _num_allocated_blocks(){
+
+    size_t counter = 0;
+    struct MallocMetadata *block = &dummy_head;
+
+
+    // start from first block - not from dummy
+    block = block->next;
+
+    while(block){
+        validate_cookie(block);
+        counter++;
+        block = block->next;
+    }
+
+    return counter + mmap_number_blocks;
+
+}
+
+
+
+//// ---8---
+size_t _num_allocated_bytes(){
+
+    size_t allocated_bytes = 0;
+
+    struct MallocMetadata *block = &dummy_head;
+    block = block->next;
+
+    // count free bytes without metadata
+    while(block){
+
+        validate_cookie(block);
+        allocated_bytes += block->size;
+        block = block->next;
+    }
+
+    size_t metadata_bytes = _num_meta_data_bytes();
+    return allocated_bytes + mmap_number_bytes - metadata_bytes;
+}
+
+
+
 
 //// utils
 struct MallocMetadata* find_block(size_t size){
@@ -585,6 +679,8 @@ struct MallocMetadata* find_block(size_t size){
     }
 
     while(block){
+
+        validate_cookie(block);
         if(block->is_free && block->size >= size){
             return block;
         }
@@ -615,7 +711,6 @@ MallocMetadata* get_best_fit(int order, int* best_fit_order){
 
     for(int i = order; i < MAX_ORDER+1; i++) {
         if(free_array[i].next_free){
-//            cout << "size is" << free_array[i].next_free->size << endl;
             *best_fit_order = i;
             return free_array[i].next_free;
         }
@@ -624,103 +719,13 @@ MallocMetadata* get_best_fit(int order, int* best_fit_order){
     return nullptr;
 }
 
+void validate_cookie(MallocMetadata* metadata){
 
-
-
-
-int main(){
-
-/*    smalloc(10);
-    smalloc(100);*/
-
-//    smalloc(1000);
-    void* address1 = smalloc(10000);
-    void* address2 = smalloc(10000);
-    void* address3 = smalloc(40000);
-    //smalloc(10000);
-
-    cout << "---finished allocation---" << endl;
-    int num_allocated = _num_allocated_blocks();
-    cout << "---num allocated blocks---" << endl;
-    int num_bytes = _num_allocated_bytes();
-    cout << "---num allocated bytes---" << endl;
-    int num_free = _num_free_blocks();
-    int num_free_bytes = _num_free_bytes();
-
-    cout << "num allocated blocks: " << num_allocated << endl;
-    cout << "num allocated bytes: " << num_bytes << endl;
-    cout << "num free blocks: " << num_free << endl;
-    cout << "num free bytes: " << num_free_bytes << endl;
-
-    cout << "--------------------------------" <<endl;
-    cout << "" <<endl;
-
-    sfree(address2);
-
-    cout << "---finished allocation---" << endl;
-    num_allocated = _num_allocated_blocks();
-    cout << "---num allocated blocks---" << endl;
-    num_bytes = _num_allocated_bytes();
-    cout << "---num allocated bytes---" << endl;
-    num_free = _num_free_blocks();
-    num_free_bytes = _num_free_bytes();
-
-    cout << "num allocated blocks: " << num_allocated << endl;
-    cout << "num allocated bytes: " << num_bytes << endl;
-    cout << "num free blocks: " << num_free << endl;
-    cout << "num free bytes: " << num_free_bytes << endl;
-    cout << "--------------------------------" <<endl;
-    cout << "" <<endl;
-
-    sfree(address3);
-
-    cout << "---finished allocation---" << endl;
-    num_allocated = _num_allocated_blocks();
-    cout << "---num allocated blocks---" << endl;
-    num_bytes = _num_allocated_bytes();
-    cout << "---num allocated bytes---" << endl;
-    num_free = _num_free_blocks();
-    num_free_bytes = _num_free_bytes();
-
-    cout << "num allocated blocks: " << num_allocated << endl;
-    cout << "num allocated bytes: " << num_bytes << endl;
-    cout << "num free blocks: " << num_free << endl;
-    cout << "num free bytes: " << num_free_bytes << endl;
-    cout << "--------------------------------" <<endl;
-    cout << "" <<endl;
-
-    sfree(address1);
-
-
-//    smalloc(1000000);
-//    sfree(address);
-
-
-/*    assert(free_array[MAX_ORDER].next_free);
-    assert(!free_array[9].next_free->next_free);
-    assert(!free_array[8].next_free->next_free);
-    assert(!free_array[7].next_free);*/
-
-
-    cout << "---finished allocation---" << endl;
-    num_allocated = _num_allocated_blocks();
-    cout << "---num allocated blocks---" << endl;
-    num_bytes = _num_allocated_bytes();
-    cout << "---num allocated bytes---" << endl;
-    num_free = _num_free_blocks();
-    num_free_bytes = _num_free_bytes();
-
-
-    cout << "num allocated blocks: " << num_allocated << endl;
-    cout << "num allocated bytes: " << num_bytes << endl;
-    cout << "num free blocks: " << num_free << endl;
-    cout << "num free bytes: " << num_free_bytes << endl;
-
-
-
-
-
-    return 0;
+    if(!metadata){
+        return;
+    }
+    if(metadata->cookie != rand_cookie){
+        exit(0xdeadbeef);
+    }
 }
-
 
